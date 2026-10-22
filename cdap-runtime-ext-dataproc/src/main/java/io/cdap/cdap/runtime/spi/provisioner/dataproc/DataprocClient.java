@@ -55,6 +55,7 @@ import com.google.longrunning.OperationsClient;
 import com.google.protobuf.Duration;
 import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.Status;
 import io.cdap.cdap.api.exception.ErrorCategory;
 import io.cdap.cdap.api.exception.ErrorCategory.ErrorCategoryEnum;
@@ -926,8 +927,40 @@ abstract class DataprocClient implements AutoCloseable {
       return Optional.ofNullable(Iterables.getFirst(response.getPage().getValues(), null));
 
     } catch (ApiException e) {
+      if ("DELETE".equals(operationType) && e.getStatusCode().getCode().getHttpStatusCode() == 404) {
+        return getLatestDeleteOperation(operationName, clusterName);
+      }
       throw DataprocUtils.handleApiException(null, e,
         "Failed to retrieve latest operation metadata for cluster " + clusterName, errorCategory);
+    }
+  }
+
+  private Optional<Operation> getLatestDeleteOperation(String operationName, String clusterName)
+    throws RetryableProvisionException {
+    String filter = "operationType = \"DELETE\" AND status.state = DONE";
+    try {
+      OperationsClient.ListOperationsPagedResponse response =
+        client.getOperationsClient().listOperations(operationName, filter);
+      if (response.getPage() == null) {
+        return Optional.empty();
+      }
+      for (Operation op : response.getPage().getValues()) {
+        if (!op.hasMetadata() || !op.getMetadata().is(ClusterOperationMetadata.class)) {
+          continue;
+        }
+        try {
+          ClusterOperationMetadata metadata = op.getMetadata().unpack(ClusterOperationMetadata.class);
+          if (clusterName.equals(metadata.getClusterName())) {
+            return Optional.of(op);
+          }
+        } catch (InvalidProtocolBufferException ex) {
+          LOG.debug("Failed to unpack ClusterOperationMetadata for operation {}", op.getName(), ex);
+        }
+      }
+      return Optional.empty();
+    } catch (ApiException e) {
+      throw DataprocUtils.handleApiException(null, e,
+        "Failed to retrieve latest delete operation metadata for cluster " + clusterName, errorCategory);
     }
   }
 

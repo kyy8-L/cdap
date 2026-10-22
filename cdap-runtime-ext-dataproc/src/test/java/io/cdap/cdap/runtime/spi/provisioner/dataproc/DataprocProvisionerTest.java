@@ -19,9 +19,12 @@ package io.cdap.cdap.runtime.spi.provisioner.dataproc;
 import com.google.api.gax.rpc.ApiException;
 import com.google.api.gax.rpc.StatusCode;
 import com.google.cloud.dataproc.v1.ClusterOperationMetadata;
+import com.google.cloud.dataproc.v1.ClusterOperationStatus;
 import com.google.cloud.dataproc.v1.ClusterStatus.State;
 import com.google.common.collect.ImmutableMap;
 import com.google.longrunning.Operation;
+import com.google.protobuf.Any;
+import com.google.protobuf.Timestamp;
 import io.cdap.cdap.api.exception.ErrorCategory;
 import io.cdap.cdap.api.exception.ErrorCategory.ErrorCategoryEnum;
 import io.cdap.cdap.api.exception.ErrorType;
@@ -520,9 +523,20 @@ public class DataprocProvisionerTest {
     Mockito.when(dataprocClient.getClusterStatus(Mockito.anyString()))
       .thenReturn(ClusterStatus.RUNNING);
 
+    ClusterOperationMetadata metadata = ClusterOperationMetadata.newBuilder()
+      .setClusterName("mycluster")
+      .addStatusHistory(ClusterOperationStatus.newBuilder()
+        .setStateStartTime(Timestamp.newBuilder().setSeconds(1000L).build())
+        .build())
+      .setStatus(ClusterOperationStatus.newBuilder()
+        .setStateStartTime(Timestamp.newBuilder().setSeconds(1120L).build())
+        .build())
+      .build();
+
     Operation operation = Operation.newBuilder()
       .setName("op-create")
       .setDone(true)
+      .setMetadata(Any.pack(metadata))
       .build();
 
     Mockito.when(dataprocClient.getLatestOperation(Mockito.anyString(), Mockito.anyString()))
@@ -534,6 +548,10 @@ public class DataprocProvisionerTest {
     Integer count = localContext.getMetricCounts().get("provisioner.cluster.operation.response.count");
     Assert.assertNotNull("The LRO metric was not emitted or recorded in the mock context", count);
     Assert.assertEquals(1, count.intValue());
+
+    Long latency = localContext.getMetricGauges().get("provisioner.cluster.operation.latency.seconds");
+    Assert.assertNotNull("The LRO latency metric was not emitted or recorded in the mock context", latency);
+    Assert.assertEquals(120L, latency.longValue());
   }
 
   @Test
@@ -553,12 +571,35 @@ public class DataprocProvisionerTest {
     Mockito.when(dataprocClient.getClusterStatus(Mockito.anyString()))
       .thenReturn(ClusterStatus.NOT_EXISTS);
 
+    ClusterOperationMetadata metadata = ClusterOperationMetadata.newBuilder()
+      .setClusterName("mycluster")
+      .addStatusHistory(ClusterOperationStatus.newBuilder()
+        .setStateStartTime(Timestamp.newBuilder().setSeconds(2000L).build())
+        .build())
+      .setStatus(ClusterOperationStatus.newBuilder()
+        .setStateStartTime(Timestamp.newBuilder().setSeconds(2045L).build())
+        .build())
+      .build();
+
+    Operation operation = Operation.newBuilder()
+      .setName("op-delete")
+      .setDone(true)
+      .setMetadata(Any.pack(metadata))
+      .build();
+
+    Mockito.when(dataprocClient.getLatestOperation("mycluster", "DELETE"))
+      .thenReturn(Optional.of(operation));
+
     ClusterStatus currentStatus = provisioner.getClusterStatus(localContext, cdapClusterInput);
     Assert.assertEquals(ClusterStatus.NOT_EXISTS, currentStatus);
 
     Integer count = localContext.getMetricCounts().get("provisioner.cluster.operation.response.count");
     Assert.assertNotNull("The LRO metric was not emitted or recorded in the mock context", count);
     Assert.assertEquals(1, count.intValue());
+
+    Long latency = localContext.getMetricGauges().get("provisioner.cluster.operation.latency.seconds");
+    Assert.assertNotNull("The LRO latency metric was not emitted or recorded in the mock context", latency);
+    Assert.assertEquals(45L, latency.longValue());
   }
 
   @Test
@@ -683,13 +724,23 @@ public class DataprocProvisionerTest {
 
     DataprocUtils.emitMetric(localContext, metricWithGenericExp);
 
+    DataprocMetric gaugeMetric = DataprocMetric.builder("test.gauge.metric")
+      .setRegion("us-test1")
+      .setMethod("CREATE")
+      .build();
+
+    DataprocUtils.emitMetric(localContext, gaugeMetric, 42L);
+
     Integer apiCount = localContext.getMetricCounts().get("test.api.metric");
     Integer genericCount = localContext.getMetricCounts().get("test.generic.metric");
+    Long gaugeValue = localContext.getMetricGauges().get("test.gauge.metric");
 
     Assert.assertNotNull(apiCount);
     Assert.assertNotNull(genericCount);
+    Assert.assertNotNull(gaugeValue);
     Assert.assertEquals(1, apiCount.intValue());
     Assert.assertEquals(1, genericCount.intValue());
+    Assert.assertEquals(42L, gaugeValue.longValue());
   }
   
   @Test

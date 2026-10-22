@@ -788,6 +788,56 @@ public class DataprocClientTest {
     Assert.assertEquals("latest-op", result.get().getName());
   }
 
+  @Test
+  public void testGetLatestOperationDeleteFallbackOn404() throws Exception {
+    DataprocClient client = sshDataprocClientFactory.create(dataprocConf,
+                                                            new ErrorCategory(ErrorCategoryEnum.OTHERS));
+
+    OperationsClient operationsClient = PowerMockito.mock(OperationsClient.class);
+    PowerMockito.when(clusterControllerClientMock.getOperationsClient()).thenReturn(operationsClient);
+
+    StatusCode statusCode =
+      Mockito.mock(StatusCode.class, Mockito.withSettings().withoutAnnotations());
+    Mockito.when(statusCode.getCode()).thenReturn(StatusCode.Code.NOT_FOUND);
+
+    ApiException notFoundException =
+      Mockito.mock(ApiException.class, Mockito.withSettings().withoutAnnotations());
+    Mockito.when(notFoundException.getStatusCode()).thenReturn(statusCode);
+
+    PowerMockito.when(operationsClient.listOperations(
+        Mockito.eq("projects/dummy-project/regions/us-test1/operations"),
+        Mockito.eq("clusterName=\"mycluster\" AND operationType=\"DELETE\"")))
+      .thenThrow(notFoundException);
+
+    OperationsClient.ListOperationsPagedResponse fallbackResponse =
+      PowerMockito.mock(OperationsClient.ListOperationsPagedResponse.class);
+    PowerMockito.when(operationsClient.listOperations(
+        Mockito.eq("projects/dummy-project/regions/us-test1/operations"),
+        Mockito.eq("operationType = \"DELETE\" AND status.state = DONE")))
+      .thenReturn(fallbackResponse);
+
+    OperationsClient.ListOperationsPage page = Mockito.mock(OperationsClient.ListOperationsPage.class);
+    Mockito.when(fallbackResponse.getPage()).thenReturn(page);
+
+    Operation otherClusterOp = Operation.newBuilder()
+      .setName("other-delete-op")
+      .setDone(true)
+      .setMetadata(Any.pack(ClusterOperationMetadata.newBuilder().setClusterName("othercluster").build()))
+      .build();
+    Operation targetClusterOp = Operation.newBuilder()
+      .setName("target-delete-op")
+      .setDone(true)
+      .setMetadata(Any.pack(ClusterOperationMetadata.newBuilder().setClusterName("mycluster").build()))
+      .build();
+
+    Mockito.when(page.getValues()).thenReturn(Arrays.asList(otherClusterOp, targetClusterOp));
+
+    Optional<Operation> result = client.getLatestOperation("mycluster", "DELETE");
+
+    Assert.assertTrue(result.isPresent());
+    Assert.assertEquals("target-delete-op", result.get().getName());
+  }
+
   /** validateProperties is bypassed for runtime arguments, so the client must fail cleanly. */
   @Test
   public void testCreateClusterWithMismatchedFlexVmListSizes() throws Exception {

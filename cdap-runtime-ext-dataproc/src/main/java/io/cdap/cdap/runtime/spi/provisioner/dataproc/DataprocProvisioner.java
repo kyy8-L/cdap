@@ -24,6 +24,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableSet;
 import com.google.longrunning.Operation;
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.cdap.cdap.api.exception.ErrorCategory;
 import io.cdap.cdap.api.exception.ErrorType;
 import io.cdap.cdap.runtime.spi.ProgramRunInfo;
@@ -527,35 +528,51 @@ public class DataprocProvisioner extends AbstractDataprocProvisioner {
     }
 
     try {
-      String metricName = "provisioner.cluster.operation.response.count";
       String imageVersion = getImageVersion(context, conf);
-
-      DataprocMetric.Builder builder = DataprocMetric.builder(metricName)
-        .setRegion(conf.getRegion())
-        .setImageVersion(imageVersion)
-        .setMethod(method);
-
-      if ("DELETE".equals(method) && currentStatus == ClusterStatus.NOT_EXISTS) {
-        builder.setStatusCode(StatusCode.Code.OK);
-        DataprocUtils.emitMetric(context, builder.build());
-        return;
-      }
+      boolean isDeletedCluster = "DELETE".equals(method) && currentStatus == ClusterStatus.NOT_EXISTS;
 
       Optional<Operation> operation = client.getLatestOperation(clusterName, method);
+      Operation op = (operation != null && operation.isPresent() && operation.get().getDone())
+        ? operation.get() : null;
 
-      if (!operation.isPresent() || !operation.get().getDone()) {
+      if (op == null && !isDeletedCluster) {
         return;
       }
 
-      Operation op = operation.get();
-
-      if (op.hasError()) {
+      StatusCode.Code statusCode = StatusCode.Code.OK;
+      if (op != null && op.hasError()) {
         Status.Code grpcCode = Status.fromCodeValue(op.getError().getCode()).getCode();
-        StatusCode gaxStatusCode = GrpcStatusCode.of(grpcCode);
-        builder.setStatusCode(gaxStatusCode.getCode());
+        statusCode = GrpcStatusCode.of(grpcCode).getCode();
       }
-      DataprocUtils.emitMetric(context, builder.build());
-    } catch (RetryableProvisionException | RuntimeException ex) {
+
+      DataprocUtils.emitMetric(context,
+        DataprocMetric.builder("provisioner.cluster.operation.response.count")
+          .setRegion(conf.getRegion())
+          .setImageVersion(imageVersion)
+          .setMethod(method)
+          .setStatusCode(statusCode)
+          .build());
+
+      if (op != null && op.hasMetadata() && op.getMetadata().is(ClusterOperationMetadata.class)) {
+        ClusterOperationMetadata metadata = op.getMetadata().unpack(ClusterOperationMetadata.class);
+        if (metadata.getStatusHistoryCount() > 0
+            && metadata.getStatusHistory(0).hasStateStartTime()
+            && metadata.hasStatus()
+            && metadata.getStatus().hasStateStartTime()) {
+          long startSeconds = metadata.getStatusHistory(0).getStateStartTime().getSeconds();
+          long endSeconds = metadata.getStatus().getStateStartTime().getSeconds();
+          long latencySeconds = Math.max(0L, endSeconds - startSeconds);
+          DataprocUtils.emitMetric(context,
+            DataprocMetric.builder("provisioner.cluster.operation.latency.seconds")
+              .setRegion(conf.getRegion())
+              .setImageVersion(imageVersion)
+              .setMethod(method)
+              .setStatusCode(statusCode)
+              .build(),
+            latencySeconds);
+        }
+      }
+    } catch (InvalidProtocolBufferException | RetryableProvisionException | RuntimeException ex) {
       LOG.warn("Failed to retrieve LRO operation metadata for metric emission on cluster {}", clusterName, ex);
     }
   }
